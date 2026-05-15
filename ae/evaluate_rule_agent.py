@@ -1,22 +1,9 @@
-"""Evaluate the rule-based AE agent inside the official til_environment.
+"""Evaluate the AE agent inside the official til_environment.
 
-This is for local/Jupyter testing, not for the Docker submission server.
-
-Expected folder layout:
-
-    TIL/ae/evaluate_rule_agent.py
-    til-26-ae/til_environment/...
-
-Install the official environment first:
-
-    git clone https://github.com/til-ai/til-26-ae.git
-    cd til-26-ae
-    pip install -e .
-
-Then from TIL/ae:
-
-    python evaluate_rule_agent.py --episodes 20 --novice
-    python evaluate_rule_agent.py --episodes 50
+Run from TIL/ae after installing til_environment:
+    python evaluate_rule_agent.py --episodes 10 --novice
+    python evaluate_rule_agent.py --episodes 1 --novice --details
+    python evaluate_rule_agent.py --episodes 10 --novice --no-bombs
 """
 
 from __future__ import annotations
@@ -27,10 +14,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Make local src import work when run as: python evaluate_rule_agent.py
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from ae_manager import AEManager  # noqa: E402
+
+PLACE_BOMB = 5
+STAY = 4
 
 
 def make_env(novice: bool = False, render: bool = False):
@@ -46,14 +35,14 @@ def make_env(novice: bool = False, render: bool = False):
     return Bomberman(cfg)
 
 
-def run_episode(seed: int, novice: bool = False, render: bool = False) -> dict[str, Any]:
+def run_episode(seed: int, novice: bool = False, render: bool = False, no_bombs: bool = False) -> dict[str, Any]:
     env = make_env(novice=novice, render=render)
     env.reset(seed=seed)
 
     managers = {agent: AEManager() for agent in env.agents}
     totals = {agent: 0.0 for agent in env.agents}
+    action_counts = {agent: {i: 0 for i in range(6)} for agent in env.agents}
 
-    # PettingZoo AEC: each environment move requires all six agents to act.
     max_turns = 6 * 205
     turns = 0
     while env.agents and turns < max_turns:
@@ -66,11 +55,12 @@ def run_episode(seed: int, novice: bool = False, render: bool = False) -> dict[s
             action = None
         else:
             action = managers[agent].ae(obs)
+            if no_bombs and action == PLACE_BOMB:
+                action = STAY
+            action_counts[agent][int(action)] += 1
 
         env.step(action)
 
-        # After the sixth agent acts, the environment executes one full round
-        # and env.rewards contains that round's reward for all agents.
         if getattr(env.agent_selector, "is_first", lambda: False)():
             for a, r in env.rewards.items():
                 totals[a] = totals.get(a, 0.0) + float(r)
@@ -83,6 +73,7 @@ def run_episode(seed: int, novice: bool = False, render: bool = False) -> dict[s
     return {
         "seed": seed,
         "total_by_agent": totals,
+        "action_counts": action_counts,
         "mean_reward": sum(totals.values()) / max(1, len(totals)),
         "max_reward": max(totals.values()) if totals else 0.0,
         "min_reward": min(totals.values()) if totals else 0.0,
@@ -95,16 +86,22 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=88)
     parser.add_argument("--novice", action="store_true", help="use fixed novice map")
     parser.add_argument("--render", action="store_true", help="slow; render rgb frames")
+    parser.add_argument("--details", action="store_true", help="print per-agent totals and action counts")
+    parser.add_argument("--no-bombs", action="store_true", help="replace PLACE_BOMB with STAY for ablation testing")
     args = parser.parse_args()
 
     results = []
     for i in range(args.episodes):
-        result = run_episode(seed=args.seed + i, novice=args.novice, render=args.render)
+        result = run_episode(seed=args.seed + i, novice=args.novice, render=args.render, no_bombs=args.no_bombs)
         results.append(result)
         print(
             f"episode={i:03d} seed={result['seed']} "
             f"mean={result['mean_reward']:.2f} max={result['max_reward']:.2f} min={result['min_reward']:.2f}"
         )
+        if args.details:
+            for agent, total in sorted(result["total_by_agent"].items()):
+                counts = result["action_counts"][agent]
+                print(f"  {agent}: reward={total:.2f} actions={counts}")
 
     means = [r["mean_reward"] for r in results]
     print("\nSummary")
